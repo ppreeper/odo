@@ -1,0 +1,187 @@
+name: odo
+help: Odoo Podman Tool
+version: 0.1.0
+
+environment_variables:
+  - name: pod
+    help: Odoo instance
+    default: ${PWD##*/}
+
+commands:
+  - name: config
+    help: additional config options
+    commands:
+      - name: vscode
+        help: Setup vscode settings and launch json files
+      - name: pyright
+        help: Setup pyright settings
+
+  - name: start
+    help: Start the instance
+
+    examples:
+      - oda start
+
+  - name: stop
+    help: Stop the instance
+
+    examples:
+      - oda stop
+
+  - name: restart
+    help: Restart the instance
+
+    examples:
+      - oda stop
+
+  - name: logs
+    help: Follow the logs
+
+    examples:
+      - oda logs
+
+  - name: init
+    help: initialize the database
+    args:
+      - name: modules
+        help: comma seperated list of modules
+        default: base,web
+    flags:
+      - long: "--name"
+        short: "-d"
+        help: Database Name
+        arg: name
+        default: $(grep db_name conf/odoo.conf | awk -F'=' '{print $2}' | tr -d '[:space:]')
+
+    examples:
+      - oda init
+
+  - name: install
+    help: Install module(s)
+    args:
+      - name: modules
+        help: comma seperated list of modules
+        required: true
+    flags:
+      - long: "--name"
+        short: "-d"
+        help: Database Name
+        arg: name
+        default: $(grep db_name conf/odoo.conf | awk -F'=' '{print $2}' | tr -d '[:space:]')
+
+    examples:
+      - oda install base,web
+
+  - name: upgrade
+    help: Upgrade module(s)
+    args:
+      - name: modules
+        help: comma seperated list of modules
+        required: true
+    flags:
+      - long: "--name"
+        short: "-d"
+        help: Database Name
+        arg: name
+        default: $(grep db_name conf/odoo.conf | awk -F'=' '{print $2}' | tr -d '[:space:]')
+
+    examples:
+      - oda upgrade base,web
+
+  - name: psql
+    help: Access the raw database
+    flags:
+      - long: "--host"
+        help: Database Host
+        arg: host
+        default: $(grep db_host conf/odoo.conf | awk -F'=' '{print $2}' | tr -d '[:space:]')
+      - long: "--port"
+        help: Database Port
+        arg: port
+        default: $(grep db_port conf/odoo.conf | awk -F'=' '{print $2}' | tr -d '[:space:]')
+      - long: "--user"
+        help: Username
+        arg: username
+        default: $(grep db_user conf/odoo.conf | awk -F'=' '{print $2}' | tr -d '[:space:]')
+      - long: "--pass"
+        help: Password
+        arg: pass
+        default: $(grep db_pass conf/odoo.conf | awk -F'=' '{print $2}' | tr -d '[:space:]')
+      - long: "--name"
+        help: Database Name
+        arg: name
+        default: $(grep db_name conf/odoo.conf | awk -F'=' '{print $2}' | tr -d '[:space:]')
+
+    examples:
+      - oda psql
+
+  - name: query
+    help: Query the database
+    args:
+      - name: model
+        help: odoo model to be queried
+        required: true
+    flags:
+      - long: "--db_name"
+        help: Database Name
+        arg: database
+        default: $(grep db_name conf/odoo.conf | awk -F'=' '{print $2}' | tr -d '[:space:]')
+      - short: "-U"
+        help: Odoo username
+        arg: username
+        default: "admin"
+      - short: "-P"
+        help: Odoo password
+        arg: password
+        default: "admin"
+      - long: "--filter"
+        help: Model domain filter
+        arg: filter
+        default: ""
+      - long: "--fields"
+        help: Model fields to show
+        arg: fields
+      - long: "--limit"
+        help: Limit on records returned
+        arg: limit
+      - long: "--offset"
+        help: Offset of records returned
+        arg: offset
+      - long: "--count"
+        help: Count matching records
+
+  - name: admin
+    help: Admin user management
+    flags:
+      - long: "--host"
+        help: Database Host
+        arg: host
+        default: $(grep db_host conf/odoo.conf | awk -F'=' '{print $2}' | tr -d '[:space:]')
+      - long: "--port"
+        help: Database Port
+        arg: port
+        default: $(grep db_port conf/odoo.conf | awk -F'=' '{print $2}' | tr -d '[:space:]')
+      - long: "--db_user"
+        help: Username
+        arg: db_username
+        default: $(grep db_user conf/odoo.conf | awk -F'=' '{print $2}' | tr -d '[:space:]')
+      - long: "--db_pass"
+        help: Password
+        arg: db_pass
+        default: $(grep db_pass conf/odoo.conf | awk -F'=' '{print $2}' | tr -d '[:space:]')
+      - long: "--db_name"
+        help: Database Name
+        arg: db_name
+        default: $(grep db_name conf/odoo.conf | awk -F'=' '{print $2}' | tr -d '[:space:]')
+    commands:
+      - name: user
+        help: Odoo Admin username
+        args:
+          - name: admin_name
+            help: Odoo Admin username
+      - name: password
+        help: Odoo Admin password
+        args:
+          - name: admin_password
+            help: Odoo Admin password
+            required: true
