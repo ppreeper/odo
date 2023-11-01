@@ -7,8 +7,8 @@ environment_variables:
     help: Odoo instance
     default: ${PWD##*/}
   - name: container
-    help: Container image ghcr.io/ppreeper/odoobase:main
-    default: localhost/odoobase:latest
+    help: Container image
+    default: ghcr.io/ppreeper/odoobase:main
 
 commands:
   - name: config

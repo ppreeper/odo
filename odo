@@ -76,8 +76,8 @@ odo_usage() {
 
 		# :environment_variable.usage
 		printf "  %s\n" "CONTAINER"
-		printf "    Container image ghcr.io/ppreeper/odoobase:main\n"
-		printf "    Default: localhost/odoobase:latest\n"
+		printf "    Container image\n"
+		printf "    Default: ghcr.io/ppreeper/odoobase:main\n"
 		echo
 
 	fi
@@ -2156,7 +2156,7 @@ parse_requirements() {
 	# :command.environment_variables_filter
 	# :command.environment_variables_default
 	export POD="${POD:-${PWD##*/}}"
-	export CONTAINER="${CONTAINER:-localhost/odoobase:latest}"
+	export CONTAINER="${CONTAINER:-ghcr.io/ppreeper/odoobase:main}"
 
 	# :command.command_filter
 	action=${1:-}
@@ -4495,7 +4495,7 @@ initialize() {
 
 	# :command.environment_variables_default
 	export POD="${POD:-${PWD##*/}}"
-	export CONTAINER="${CONTAINER:-localhost/odoobase:latest}"
+	export CONTAINER="${CONTAINER:-ghcr.io/ppreeper/odoobase:main}"
 
 }
 
