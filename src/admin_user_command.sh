@@ -1,8 +1,3 @@
-echo "# this file is located in 'src/admin_user_command.sh'"
-echo "# code for 'odo admin user' goes here"
-echo "# you can edit it freely and regenerate (it will not be overwritten)"
-inspect_args
-
 if [[ -f "./conf/odoo.conf" ]]; then
   if [ -z "${args[admin_name]}" ]; then
     admin_user=$(psql postgres://${args[--db_user]}:${args[--db_pass]}@${args[--host]}:${args[--port]}/${args[--db_name]} -t -c "select login from res_users where id=2;")
@@ -10,8 +5,11 @@ if [[ -f "./conf/odoo.conf" ]]; then
   else
     read -r -p "Are you sure you want to change the admin username to: ${args[admin_name]} [YES/N] " response
     if [[ "$response" =~ ^(YES)$ ]]; then
-    echo "changing username to: ${args[admin_name]}"
-    admin_user=$(psql postgres://${args[--db_user]}:${args[--db_pass]}@${args[--host]}:${args[--port]}/${args[--db_name]} -t -c "update res_users set login='${args[admin_name]}' where id=2;")
+      read -r -p "Are you sure you want to change the admin username to: ${args[admin_name]} [YES/N] " response
+      if [[ "$response" =~ ^(YES)$ ]]; then
+        echo "changing username to: ${args[admin_name]}"
+        admin_user=$(psql postgres://${args[--db_user]}:${args[--db_pass]}@${args[--host]}:${args[--port]}/${args[--db_name]} -t -c "update res_users set login='${args[admin_name]}' where id=2;")
+      fi
     fi
   fi
 else

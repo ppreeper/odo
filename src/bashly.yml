@@ -6,6 +6,9 @@ environment_variables:
   - name: pod
     help: Odoo instance
     default: ${PWD##*/}
+  - name: container
+    help: Container image ghcr.io/ppreeper/odoobase:main
+    default: localhost/odoobase:latest
 
 commands:
   - name: config
@@ -39,6 +42,16 @@ commands:
 
     examples:
       - oda logs
+
+  - name: scaffold
+    help: Generates an Odoo module skeleton in addons
+    args:
+      - name: module
+        help: Name of the module to create
+        required: true
+
+    examples:
+      - oda scaffold module_ext
 
   - name: init
     help: initialize the database
@@ -87,6 +100,24 @@ commands:
 
     examples:
       - oda upgrade base,web
+
+  - name: manifest
+    help: export import module manifest
+    commands:
+      - name: export
+        help: export manifest.json
+      - name: import
+        help: import manifest.json
+        args:
+          - name: file
+            help: manifest file to read
+            default: manifest.json
+      - name: remote
+        help: download manifest from backup
+        args:
+          - name: file
+            help: backup file to read
+            required: true
 
   - name: psql
     help: Access the raw database
@@ -150,6 +181,20 @@ commands:
       - long: "--count"
         help: Count matching records
 
+  - name: backup
+    help: Backup database filestore and addons
+
+    examples:
+      - oda backup
+
+  - name: restore
+    help: Restore database and filestore or addons
+    args:
+      - name: file
+        help: Path to backup file
+        required: true
+        repeatable: true
+
   - name: admin
     help: Admin user management
     flags:
@@ -184,4 +229,127 @@ commands:
         args:
           - name: admin_password
             help: Odoo Admin password
+            required: true
+
+  - name: project
+    help: Project level commands [CAUTION]
+    environment_variables:
+      - name: odoobase
+        default: ${HOME}/workspace/repos/odoo
+    commands:
+      - name: init
+        help: Create a new project specifying Odoo version, Odoo Port, PostgreSQL port
+        environment_variables:
+          - name: ipv4
+            private: true
+            default: $(ip -4 -br a show | grep -v ^lo | grep UP | awk '{print $3}' | awk -F'/' '{print $1}')
+        args:
+          - name: version
+            help: Odoo Version
+            required: true
+          - name: edition
+            help: Odoo edition
+            required: true
+            allowed:
+              - "community"
+              - "enterprise"
+          - name: projectname
+            help: name of the project
+            required: true
+          - name: oport
+            help: Odoo Port
+            default: "8069"
+          - name: gport
+            help: Odoo IM Port
+            default: "8072"
+          - name: pgport
+            help: PostgreSQL Port
+            default: "5432"
+
+        examples:
+          - oda project init 16
+          - oda project init 16 8080
+          - oda project init 16 8080 5444
+
+      - name: branch
+        help: branch a project from git repository and setup for dev environ
+        environment_variables:
+          - name: ipv4
+            private: true
+            default: $(ip -4 -br a show | grep -v ^lo | grep UP | awk '{print $3}' | awk -F'/' '{print $1}')
+        args:
+          - name: version
+            help: Odoo Version
+            required: true
+          - name: edition
+            help: Odoo edition
+            required: true
+            allowed:
+              - "community"
+              - "enterprise"
+          - name: projectname
+            help: name of the project
+            required: true
+          - name: branch
+            help: branch to pull from the repository
+            required: true
+          - name: url
+            help: url of the repository
+            required: true
+          - name: oport
+            help: Odoo Port
+            default: "8069"
+          - name: gport
+            help: Odoo IM Port
+            default: "8072"
+          - name: pgport
+            help: PostgreSQL Port
+            default: "5432"
+
+      - name: reset
+        help: Drop database and filestore [CAUTION]
+        flags:
+          - long: "--host"
+            help: Database Host
+            arg: host
+            default: $(grep db_host conf/odoo.conf | awk -F'=' '{print $2}' | tr -d '[:space:]')
+          - long: "--port"
+            help: Database Port
+            arg: port
+            default: $(grep db_port conf/odoo.conf | awk -F'=' '{print $2}' | tr -d '[:space:]')
+          - long: "--user"
+            help: Username
+            arg: username
+            default: $(grep db_user conf/odoo.conf | awk -F'=' '{print $2}' | tr -d '[:space:]')
+          - long: "--pass"
+            help: Password
+            arg: pass
+            default: $(grep db_pass conf/odoo.conf | awk -F'=' '{print $2}' | tr -d '[:space:]')
+          - long: "--name"
+            help: Database Name
+            arg: name
+            default: $(grep db_name conf/odoo.conf | awk -F'=' '{print $2}' | tr -d '[:space:]')
+
+        examples:
+          - oda project reset
+
+  - name: repo
+    help: Odoo community and enterprise repository management
+    environment_variables:
+      - name: odoobase
+        default: ${HOME}/workspace/repos/odoo
+    commands:
+      - name: clone
+        help: clone the Odoo source repository
+      - name: init
+        help: initialize Odoo version repository
+        args:
+          - name: version
+            help: Odoo Version
+            required: true
+      - name: update
+        help: update Odoo source repository
+        args:
+          - name: version
+            help: Odoo Version
             required: true

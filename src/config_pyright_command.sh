@@ -1,5 +1,6 @@
-[ -z ${ODOO_C} ] && export ODOO_C="odoo"
-[ -z ${ODOO_E} ] && export ODOO_E="enterprise"
+if [[ -f "./conf/odoo.conf" ]]; then
+  [ -z ${ODOO_C} ] && export ODOO_C="odoo"
+  [ -z ${ODOO_E} ] && export ODOO_E="enterprise"
 
 cat <<-_EOF_ | tee pyrightconfig.json > /dev/null
 {
@@ -17,3 +18,7 @@ cat <<-_EOF_ | tee pyrightconfig.json > /dev/null
   ]
 }
 _EOF_
+
+else
+  echo "not in a project directory"
+fi

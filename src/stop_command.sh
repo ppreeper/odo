@@ -1,5 +1,5 @@
 if [[ -f "./conf/odoo.conf" ]]; then
-  echo podman stop ${PWD##*/}
+  podman stop ${POD} || echo
 else
   echo "not in a project directory"
 fi
