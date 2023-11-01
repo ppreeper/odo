@@ -19,7 +19,7 @@ if [ -z $ODOO_PORT ]; then
   V_ODOO_C="-v ${ODOO_C}:/opt/odoo/odoo"
   ADDON_E=$(grep addons_path conf/odoo.conf | awk -F '=' '{print $2}' | awk -F',' '{print $2}')
   if [[ $ADDON_E == *"enterprise" ]]; then
-    V_ODOO_E="-v ${ODOO_E}:/opt/odoo/odoo"
+    V_ODOO_E="-v ${ODOO_E}:/opt/odoo/enterprise"
   fi
   V_ADDONS="-v ${PWD}/addons:/opt/odoo/addons"
   V_DATA="-v ${1}_data:/opt/odoo/data"
