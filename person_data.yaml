@@ -1,0 +1,12 @@
+employee:
+  address:
+    city: San Francisco
+    state: CA
+    street: 123 Main St.
+    zip: 94102
+  age: 35
+  job:
+    department: IT
+    title: Software Engineer
+    years_of_experience: 10
+  name: John Doe
