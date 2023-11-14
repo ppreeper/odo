@@ -18,10 +18,17 @@ commands:
         help: Setup vscode settings and launch json files
       - name: pyright
         help: Setup pyright settings
-  - name: manifests
+
+  - name: completions
+    help: Generate bash completions
     commands:
-      - name: gen
-      - name: apply
+      - name: show
+        help: |-
+          Show bash completions
+          Usage: eval "\$(odo completions)"
+      - name: install
+        help: |-
+          Install bash completions to ${HOME}/.local/share/bash-completions/completions/odo.bash
 
   - name: start
     help: Start the instance
@@ -248,15 +255,15 @@ commands:
             private: true
             default: $(ip -4 -br a show | grep -v ^lo | grep UP | awk '{print $3}' | awk -F'/' '{print $1}')
         args:
-          - name: version
-            help: Odoo Version
-            required: true
           - name: edition
             help: Odoo edition
             required: true
             allowed:
               - "community"
               - "enterprise"
+          - name: version
+            help: Odoo Version
+            required: true
           - name: projectname
             help: name of the project
             required: true
@@ -271,9 +278,9 @@ commands:
             default: "5432"
 
         examples:
-          - oda project init 16
-          - oda project init 16 8080
-          - oda project init 16 8080 5444
+          - oda project init community 16.0 odooproject
+          - oda project init community 16.0 odooproject 8080
+          - oda project init enterprise 17.0 odooproject 8080 5444
 
       - name: branch
         help: branch a project from git repository and setup for dev environ
