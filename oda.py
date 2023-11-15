@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
-import yaml
+"""Odoo Administration Tool
+This tool uses a local kubernetes cluster to spin up develompent environments
+It manages the Odoo source repositories in the workspace/repo/odoo directory
+"""
+from shutil import copytree
 import json
-import toml
 import base64
 import subprocess
 import argparse
@@ -9,8 +12,9 @@ import os
 import sys
 import time
 from pathlib import Path
+import yaml
+import toml
 from git import Repo
-from distutils.dir_util import copy_tree
 from kubernetes import client, config
 
 SEMVER = "0.1.0"
@@ -23,9 +27,20 @@ repo_dir = os.path.join(Path.home(), "workspace/repos/odoo")
 project_dir = os.path.join(Path.home(), "workspace/odoo")
 current_working_directory = os.getcwd()
 
+container_image = {"name": "odoobase", "image": "ghcr.io/ppreeper/odoobase:main"}
+
 # load kubernetes config
 config.load_kube_config()
 v1 = client.CoreV1Api()
+
+
+#
+def get_pod(name):
+    """Get Pod from name"""
+    ret = v1.list_pod_for_all_namespaces(watch=False)
+    for pod in ret.items:
+        if pod.metadata.name.startswith(name):
+            return pod.metadata.name
 
 
 # ===================
@@ -33,7 +48,7 @@ v1 = client.CoreV1Api()
 # kubenetes manifest generation
 def gen_pv(volume, acl, size, path):
     """Generate a PersistentVolume"""
-    config = {
+    cfg = {
         "apiVersion": "v1",
         "kind": "PersistentVolume",
         "metadata": {"name": f"{volume}-pv"},
@@ -44,13 +59,13 @@ def gen_pv(volume, acl, size, path):
             "hostPath": {"path": path},
         },
     }
-    yaml_string = yaml.dump(config)
+    yaml_string = yaml.dump(cfg)
     return "---\n" + yaml_string
 
 
 def gen_pvc(volume, acl, size):
     """Generate a PersistentVolumeClaim"""
-    config = {
+    cfg = {
         "apiVersion": "v1",
         "kind": "PersistentVolumeClaim",
         "metadata": {"name": f"{volume}-pvc"},
@@ -60,13 +75,13 @@ def gen_pvc(volume, acl, size):
             "volumeName": f"{volume}-pv",
         },
     }
-    yaml_string = yaml.dump(config)
+    yaml_string = yaml.dump(cfg)
     return "---\n" + yaml_string
 
 
 def gen_secret(name, password):
     """Generate a Secrets"""
-    config = {
+    cfg = {
         "apiVersion": "v1",
         "kind": "Secret",
         "metadata": {"name": f"{name}-secret"},
@@ -75,7 +90,7 @@ def gen_secret(name, password):
             "password": base64.b64encode(bytes(password, "utf-8")).decode(),
         },
     }
-    yaml_string = yaml.dump(config)
+    yaml_string = yaml.dump(cfg)
     return "---\n" + yaml_string
 
 
@@ -86,7 +101,7 @@ def gen_service(name, port_list):
         port_name, port = port_tuple[0], port_tuple[1]
         port_dict.append({"name": port_name, "port": port})
 
-    config = {
+    cfg = {
         "apiVersion": "v1",
         "kind": "Service",
         "metadata": {
@@ -95,38 +110,12 @@ def gen_service(name, port_list):
         },
         "spec": {"selector": {"app": name}, "ports": port_dict, "clusterIP": "None"},
     }
-    yaml_string = yaml.dump(config)
+    yaml_string = yaml.dump(cfg)
     return "---\n" + yaml_string
 
 
 def gen_ingress(name, portpath):
     """Generate Ingress to Service"""
-    # ---
-    # apiVersion: networking.k8s.io/v1
-    # kind: Ingress
-    # metadata:
-    #   name: quest17
-    #   annotations:
-    #     ingress.kubernetes.io/rewrite-target: /
-    # spec:
-    #   rules:
-    #     - host: "quest17.local"
-    #       http:
-    #         paths:
-    #           - path: "/websocket"
-    #             pathType: Exact
-    #             backend:
-    #               service:
-    #                 name: quest17
-    #                 port:
-    #                   number: 8072
-    #           - path: "/"
-    #             pathType: Prefix
-    #             backend:
-    #               service:
-    #                 name: quest17
-    #                 port:
-    #                   number: 8069
     port_dict = []
     for port_tuple in portpath:
         port_name, port = port_tuple[0], port_tuple[1]
@@ -137,7 +126,7 @@ def gen_ingress(name, portpath):
                 "backend": {"service": {"name": name, "port": {"number": port_name}}},
             }
         )
-    config = {
+    cfg = {
         "apiVersion": "networking.k8s.io/v1",
         "kind": "Ingress",
         "metadata": {
@@ -146,74 +135,12 @@ def gen_ingress(name, portpath):
         },
         "spec": {"rules": [{"host": f"{name}.local", "http": {"paths": port_dict}}]},
     }
-    yaml_string = yaml.dump(config)
+    yaml_string = yaml.dump(cfg)
     return "---\n" + yaml_string
 
 
-def gen_deployment(name, imagename, image, ports, volumes, globalvols):
+def gen_deployment(name, image, ports, volumes, globalvols):
     """Generate Deployment"""
-    # apiVersion: apps/v1
-    # kind: Deployment
-    # metadata:
-    #   name: quest17
-    #   labels:
-    #     app: quest17
-    # spec:
-    #   replicas: 1
-    #   selector:
-    #     matchLabels:
-    #       app: quest17
-    #   template:
-    #     metadata:
-    #       labels:
-    #         app: quest17
-    #     spec:
-    #       containers:
-    #         - name: odoobase
-    #           image: ghcr.io/ppreeper/odoobase:main
-    #           imagePullPolicy: Always
-    #           resources:
-    #             requests:
-    #               memory: 256Mi
-    #               cpu: 200m
-    #             limits:
-    #               memory: 512Mi
-    #               cpu: 500m
-    #           ports:
-    #             - containerPort: 8069
-    #             - containerPort: 8072
-    #           volumeMounts:
-    #             - mountPath: /opt/odoo/conf
-    #               name: quest17-conf
-    #             - mountPath: /opt/odoo/addons
-    #               name: quest17-addons
-    #             - mountPath: /opt/odoo/data
-    #               name: quest17-data
-    #             - mountPath: /opt/odoo/backups
-    #               name: quest17-backups
-    #             - mountPath: /opt/odoo/odoo
-    #               name: odoo17
-    #             - mountPath: /opt/odoo/enterprise
-    #               name: enterprise17
-    #       volumes:
-    #         - name: quest17-conf
-    #           persistentVolumeClaim:
-    #             claimName: quest17-conf-pvc
-    #         - name: quest17-addons
-    #           persistentVolumeClaim:
-    #             claimName: quest17-addons-pvc
-    #         - name: quest17-data
-    #           persistentVolumeClaim:
-    #             claimName: quest17-data-pvc
-    #         - name: quest17-backups
-    #           persistentVolumeClaim:
-    #             claimName: quest17-backups-pvc
-    #         - name: odoo17
-    #           persistentVolumeClaim:
-    #             claimName: odoo17-pvc
-    #         - name: enterprise17
-    #           persistentVolumeClaim:
-    #             claimName: enterprise17-pvc
     port_dict = []
     for port in ports:
         port_dict.append({"containerPort": port})
@@ -238,7 +165,7 @@ def gen_deployment(name, imagename, image, ports, volumes, globalvols):
             }
         )
 
-    config = {
+    cfg = {
         "apiVersion": "apps/v1",
         "kind": "Deployment",
         "metadata": {"name": name, "labels": {"app": name}},
@@ -250,8 +177,8 @@ def gen_deployment(name, imagename, image, ports, volumes, globalvols):
                 "spec": {
                     "containers": [
                         {
-                            "name": imagename,
-                            "image": image,
+                            "name": image["name"],
+                            "image": image["image"],
                             "imagePullPolicy": "Always",
                             "ports": port_dict,
                             "volumeMounts": volumemount_dict,
@@ -262,7 +189,7 @@ def gen_deployment(name, imagename, image, ports, volumes, globalvols):
             },
         },
     }
-    yaml_string = yaml.dump(config)
+    yaml_string = yaml.dump(cfg)
     return "---\n" + yaml_string
 
 
@@ -272,7 +199,7 @@ def gen_postgres_statefulset(name, version, image, port_list):
     for port_tuple in port_list:
         port_name, port = port_tuple[0], port_tuple[1]
         port_dict.append({"name": port_name, "containerPort": port})
-    config = {
+    cfg = {
         "apiVersion": "apps/v1",
         "kind": "StatefulSet",
         "metadata": {
@@ -346,15 +273,16 @@ def gen_postgres_statefulset(name, version, image, port_list):
             },
         },
     }
-    yaml_string = yaml.dump(config)
+    yaml_string = yaml.dump(cfg)
     return "---\n" + yaml_string
 
 
 def gen_configmap(name, kv_list):
+    """Generate ConfigMap"""
     data = {}
     for kv in kv_list:
         data[kv[0]] = kv[1]
-    config = {
+    cfg = {
         "apiVersion": "v1",
         "kind": "ConfigMap",
         "metadata": {
@@ -362,7 +290,7 @@ def gen_configmap(name, kv_list):
         },
         "data": data,
     }
-    yaml_string = yaml.dump(config)
+    yaml_string = yaml.dump(cfg)
     return "---\n" + yaml_string
 
 
@@ -370,8 +298,9 @@ def gen_configmap(name, kv_list):
 # ===================
 # config
 def get_host_paths(manifest):
+    """Get PersistenVolume hostPath"""
     host_paths = []
-    with open(manifest, "r") as file:
+    with open(manifest, "r", encoding="UTF-8") as file:
         docs = yaml.safe_load_all(file)
         for doc in docs:
             if doc["kind"] == "Deployment":
@@ -398,6 +327,7 @@ def get_host_paths(manifest):
 
 # config vscode
 def config_vscode():
+    """Write the VSCode config"""
     if not os.path.exists(os.path.join(current_working_directory, "conf", "odoo.conf")):
         print("not in a project directory")
         return
@@ -469,6 +399,7 @@ def config_vscode():
 
 # config pyright
 def config_pyright():
+    """Write pyrightconfig.json"""
     if not os.path.exists(os.path.join(current_working_directory, "conf", "odoo.conf")):
         print("not in a project directory")
         return
@@ -619,6 +550,7 @@ def kube_apply_postgres():
 
 
 def get_current_odoo_repos():
+    """Get Currently Copied Odoo Repos"""
     dirnames = os.listdir(repo_dir)
     dirnames = [dir for dir in dirnames if dir != "odoo"]
     dirnames = [dir for dir in dirnames if dir != "enterprise"]
@@ -631,30 +563,33 @@ def kube_gen_odoo():
     print("odoo manifest")
     if not os.path.exists(manifests):
         os.makedirs(manifests)
+    if not os.path.exists(os.path.join(project_dir, "backups")):
+        os.makedirs(os.path.join(project_dir, "backups"))
     odoo_manifest = os.path.join(manifests, "odoo.yaml")
     dirnames = get_current_odoo_repos()
-    # dirnames = os.listdir(repo_dir)
-    # dirnames = [dir for dir in dirnames if dir != "odoo"]
-    # dirnames = [dir for dir in dirnames if dir != "enterprise"]
     with open(odoo_manifest, "w", encoding="UTF-8") as odoo:
         for dirname in dirnames:
+            dname = dirname.replace(".", "-")
             dirs = os.listdir(os.path.join(repo_dir, dirname))
             for d in dirs:
                 odoo.write(
                     gen_pv(
-                        f"{d}-{dirname}",
+                        f"{d}-{dname}",
                         "ReadOnlyMany",
                         "10Gi",
                         os.path.join(repo_dir, dirname, d),
                     )
                 )
+                odoo.write(gen_pvc(f"{d}-{dname}", "ReadOnlyMany", "10Gi"))
                 odoo.write(
-                    gen_pvc(
-                        f"{d}-{dirname}",
-                        "ReadOnlyMany",
+                    gen_pv(
+                        "backups",
+                        "ReadWriteMany",
                         "10Gi",
+                        os.path.join(project_dir, "backups"),
                     )
                 )
+                odoo.write(gen_pvc("backups", "ReadWriteMany", "10Gi"))
     return
 
 
@@ -669,6 +604,7 @@ def kube_apply_odoo():
 # ===================
 # start
 def start():
+    """Start the instance"""
     if not os.path.exists(os.path.join(current_working_directory, "conf", "odoo.conf")):
         print("not in a project directory")
         return
@@ -692,6 +628,7 @@ def start():
 # ===================
 # stop
 def stop():
+    """Stop the instance"""
     if not os.path.exists(os.path.join(current_working_directory, "conf", "odoo.conf")):
         print("not in a project directory")
         return
@@ -715,6 +652,7 @@ def stop():
 # ===================
 # restart
 def restart():
+    """Restart the instance"""
     if not os.path.exists(os.path.join(current_working_directory, "conf", "odoo.conf")):
         print("not in a project directory")
         return
@@ -722,37 +660,53 @@ def restart():
     if not os.path.exists(os.path.join(current_working_directory, f"{project}.yaml")):
         print("no project manifest found")
         return
-    ret = v1.list_pod_for_all_namespaces(watch=False)
-    for pod in ret.items:
-        if pod.metadata.name.startswith(project):
-            v1.delete_namespaced_pod(pod.metadata.name, "default")
-            print(f"restart {project}")
+    pod = get_pod(project)
+    v1.delete_namespaced_pod(pod, "default")
+    print(f"restart {project}")
     return
 
 
 # ===================
 # app
-# app init
-def app_init():
-    """Initialize the Odoo instance"""
-    # TODO: app_init
-    print("app_init")
-    return
+def parse_modules(modules):
+    """parse modules list"""
+    mod_list = []
+    for m in modules:
+        mod_list.extend(m.split(","))
+    return ",".join(mod_list)
 
 
 # app install
-def app_install():
-    """Install modules"""
-    # TODO: app_install
-    print("app_install")
-    return
-
-
 # app upgrade
-def app_upgrade():
-    """Upgrade modules"""
-    # TODO: app_upgrade
-    print("app_upgrade")
+def app_install_upgrade(modules, install=True):
+    """Install Upgrade modules"""
+    iu = "-i" if install else "-u"
+    print(f"appinstall {modules}")
+    if not os.path.exists(os.path.join(current_working_directory, "conf", "odoo.conf")):
+        print("not in a project directory")
+        return
+    project = os.path.basename(current_working_directory)
+    if not os.path.exists(os.path.join(current_working_directory, f"{project}.yaml")):
+        print("no project manifest found")
+        return
+    pod_name = get_pod(project)
+    mod_list = parse_modules(modules)
+    subprocess.run(
+        [
+            "kubectl",
+            "exec",
+            "--stdin",
+            "--tty",
+            pod_name,
+            "--",
+            "odoo/odoo-bin",
+            "--no-http",
+            "--stop-after-init",
+            iu,
+            f"{mod_list}",
+        ],
+        check=True,
+    )
     return
 
 
@@ -760,17 +714,47 @@ def app_upgrade():
 # logs
 def logs():
     """Show logs"""
-    # TODO: logs
     print("logs")
+    if not os.path.exists(os.path.join(current_working_directory, "conf", "odoo.conf")):
+        print("not in a project directory")
+        return
+    project = os.path.basename(current_working_directory)
+    if not os.path.exists(os.path.join(current_working_directory, f"{project}.yaml")):
+        print("no project manifest found")
+        return
+    pod_name = get_pod(project)
+    subprocess.run(["kubectl", "logs", "-f", pod_name], check=True)
     return
 
 
 # ===================
 # scaffold
-def scaffold():
+def scaffold(module):
     """Scaffold an App"""
-    # TODO: scaffold
-    print("scaffold")
+    print(f"scaffold {module}")
+    if not os.path.exists(os.path.join(current_working_directory, "conf", "odoo.conf")):
+        print("not in a project directory")
+        return
+    project = os.path.basename(current_working_directory)
+    if not os.path.exists(os.path.join(current_working_directory, f"{project}.yaml")):
+        print("no project manifest found")
+        return
+    pod_name = get_pod(project)
+    subprocess.run(
+        [
+            "kubectl",
+            "exec",
+            "--stdin",
+            "--tty",
+            pod_name,
+            "--",
+            "odoo/odoo-bin",
+            "scaffold",
+            f"{module}",
+            "/opt/odoo/addons/.",
+        ],
+        check=True,
+    )
     return
 
 
@@ -778,8 +762,30 @@ def scaffold():
 # psql
 def psql():
     """Connect to Database"""
-    # TODO:  psql
-    print("psql")
+    if not os.path.exists(os.path.join(current_working_directory, "conf", "odoo.conf")):
+        print("not in a project directory")
+        return
+    project = os.path.basename(current_working_directory)
+    if not os.path.exists(os.path.join(current_working_directory, f"{project}.yaml")):
+        print("no project manifest found")
+        return
+    print(f"psql {project}")
+    db = get_odoo_conf("db_name")
+    subprocess.run(
+        [
+            "kubectl",
+            "exec",
+            "--stdin",
+            "--tty",
+            "postgres-0",
+            "--",
+            "su",
+            "postgres",
+            "-c",
+            f"/usr/local/bin/psql {db}",
+        ],
+        check=True,
+    )
     return
 
 
@@ -796,8 +802,19 @@ def query():
 # backup
 def backup():
     """Backup to file"""
-    # TODO: backup
     print("backup")
+    if not os.path.exists(os.path.join(current_working_directory, "conf", "odoo.conf")):
+        print("not in a project directory")
+        return
+    project = os.path.basename(current_working_directory)
+    if not os.path.exists(os.path.join(current_working_directory, f"{project}.yaml")):
+        print("no project manifest found")
+        return
+    pod_name = get_pod(project)
+    subprocess.run(
+        ["kubectl", "exec", "--stdin", "--tty", pod_name, "--", "oda_db.py", "-b"],
+        check=True,
+    )
     return
 
 
@@ -806,7 +823,7 @@ def backup():
 def restore(backup_files):
     """Restore from backup file"""
     # TODO: restore
-    print("restore")
+    print(f"restore {backup_files}")
     return
 
 
@@ -824,7 +841,7 @@ def manifest_export():
 def manifest_import(manifest):
     """Odoo Manifest Import"""
     # TODO: manifest_import
-    print("manifest_import")
+    print(f"manifest_import {manifest}")
     return
 
 
@@ -832,7 +849,7 @@ def manifest_import(manifest):
 def manifest_remote(remote):
     """Odoo Manifest Import from remote"""
     # TODO: manifest_remote
-    print("manifest_remote")
+    print(f"manifest_remote {remote}")
     return
 
 
@@ -842,7 +859,7 @@ def manifest_remote(remote):
 def admin_user(username):
     """Set Admin username"""
     # TODO: admin_user
-    print("admin_user")
+    print(f"admin_user {username}")
     return
 
 
@@ -850,41 +867,56 @@ def admin_user(username):
 def admin_password(password):
     """Set Admin password"""
     # TODO: admin_password
-    print("admin_password")
+    print(f"admin_password {password}")
     return
 
 
 # ===================
 # project
-def gen_odoo_conf(dbname,epoch,enterprise=True):
-    enterprise_dir=""
+
+
+def get_odoo_conf(key):
+    """get key value from odoo.conf"""
+    with open(
+        os.path.join(current_working_directory, "conf", "odoo.conf"),
+        "r",
+        encoding="UTF-8",
+    ) as f:
+        lines = f.readlines()
+        for line in lines:
+            if line.startswith(key):
+                return line.split("=")[1].strip()
+    return
+
+
+def gen_odoo_conf(dbname, epoch, enterprise=True):
+    """Generate and write the project odoo.conf file"""
+    enterprise_dir = ""
     if enterprise:
-        enterprise_dir="/opt/odoo/odoo/enterprise,"
+        enterprise_dir = "/opt/odoo/enterprise,"
     return {
-        "options": {
-            "addons_path": f"/opt/odoo/odoo/addons,{enterprise_dir}/opt/odoo/addons",
-            "data_dir": "/opt/odoo/data",
-            "admin_passwd": "adminadmin",
-            "without_demo": "all",
-            "csv_internal_sep": ";",
-            "reportgz": False,
-            "server_wide_modules": "base,web",
-            "db_host": "postgres",
-            "db_port": 5432,
-            "db_maxconn": 8,
-            "db_user": "odoodev",
-            "db_password": "odooodoo",
-            "db_name": f"{dbname}_{epoch}",
-            "db_template": "template0",
-            "db_sslmode": "disable",
-            "list_db": False,
-            "proxy": True,
-            "proxy_mode": True,
-            "logfile": "/dev/stderr",
-            "log_level": "debug",
-            "log_handler": "odoo.tools.convert:DEBUG",
-            "workers": 0,
-        }
+        "addons_path": f"/opt/odoo/odoo/addons,{enterprise_dir}/opt/odoo/addons",
+        "data_dir": "/opt/odoo/data",
+        "admin_passwd": "adminadmin",
+        "without_demo": "all",
+        "csv_internal_sep": ";",
+        "reportgz": False,
+        "server_wide_modules": "base,web",
+        "db_host": "postgres",
+        "db_port": 5432,
+        "db_maxconn": 8,
+        "db_user": "odoodev",
+        "db_password": "odooodoo",
+        "db_name": f"{dbname}_{epoch}",
+        "db_template": "template0",
+        "db_sslmode": "disable",
+        "list_db": False,
+        "proxy": True,
+        "proxy_mode": True,
+        "logfile": "/dev/stderr",
+        "log_level": "debug",
+        "log_handler": "odoo.tools.convert:DEBUG",
+        "workers": 0,
     }
 
 
@@ -900,17 +932,73 @@ def project_init(edition, version, projectname):
     for pdir in ["addons", "conf", "data"]:
         os.makedirs(os.path.join(project_dir, projectname, pdir))
 
-    t = time.strftime("%Y%m%d%H%M%S",time.localtime(time.time()))
-    if edition=="community":
-        print(toml.dumps(gen_odoo_conf(projectname,epoch=t,enterprise=False)))
-    else:
-        print(toml.dumps(gen_odoo_conf(projectname,epoch=t,enterprise=True)))
+    t = time.strftime("%Y%m%d%H%M%S", time.localtime(time.time()))
 
-    with open(os.path.join(project_dir, projectname, "conf","odoo.conf"),"w",encoding="UTF-8") as odoo_conf:
-        if edition=="community":
-            odoo_conf.write(toml.dumps(gen_odoo_conf(projectname,epoch=t,enterprise=False)))
+    with open(
+        os.path.join(project_dir, projectname, "conf", "odoo.conf"),
+        "w",
+        encoding="UTF-8",
+    ) as odoo_conf:
+        if edition == "community":
+            oconf = gen_odoo_conf(projectname, epoch=t, enterprise=False)
         else:
-            odoo_conf.write(toml.dumps(gen_odoo_conf(projectname,epoch=t,enterprise=True)))
+            oconf = gen_odoo_conf(projectname, epoch=t, enterprise=True)
+        odoo_conf.write("[options]" + "\n")
+        for k, v in oconf.items():
+            odoo_conf.write(f"{k} = {v}" + "\n")
+    volumes = [
+        {
+            "name": "conf",
+            "acl": "ReadOnlyMany",
+            "size": "1Mi",
+        },
+        {
+            "name": "addons",
+            "acl": "ReadWriteOnce",
+            "size": "10Gi",
+        },
+        {
+            "name": "data",
+            "acl": "ReadWriteOnce",
+            "size": "10Gi",
+        },
+    ]
+    dep_vols = []
+    for vol in volumes:
+        dep_vols.append([vol["name"], f"/opt/odoo/{vol['name']}"])
+    with open(
+        os.path.join(project_dir, projectname, f"{projectname}.yaml"),
+        "w",
+        encoding="UTF-8",
+    ) as manifest:
+        for vol in volumes:
+            manifest.write(
+                gen_pv(
+                    f"{projectname}-{vol['name']}",
+                    vol["acl"],
+                    vol["size"],
+                    os.path.join(project_dir, projectname, vol["name"]),
+                )
+            )
+            manifest.write(
+                gen_pvc(f"{projectname}-{vol['name']}", vol["acl"], vol["size"])
+            )
+        vers = version.replace(".", "-")
+        manifest.write(
+            gen_deployment(
+                projectname,
+                container_image,
+                [8069, 8072],
+                dep_vols,
+                [
+                    ["backups", "/opt/odoo/backups"],
+                    [f"odoo-{vers}", "/opt/odoo/odoo"],
+                    [f"enterprise-{vers}", "/opt/odoo/enterprise"],
+                ],
+            )
+        )
+        manifest.write(gen_service(projectname, [["odoo", 8069], ["websocket", 8072]]))
+        manifest.write(gen_ingress(projectname, [[8069, "/"], [8072, "/websocket"]]))
 
     return
 
@@ -1026,7 +1114,7 @@ def repo_branch_clone(version):
 
     # community
     if not os.path.exists(os.path.join(repo_dir, version, "odoo")):
-        copy_tree(
+        copytree(
             os.path.join(repo_dir, "odoo"),
             os.path.join(repo_dir, version, "odoo"),
         )
@@ -1036,7 +1124,7 @@ def repo_branch_clone(version):
 
     # enterprise
     if not os.path.exists(os.path.join(repo_dir, version, "enterprise")):
-        copy_tree(
+        copytree(
             os.path.join(repo_dir, "enterprise"),
             os.path.join(repo_dir, version, "enterprise"),
         )
@@ -1169,9 +1257,6 @@ def main():
         dest="app", title="app", help="app management", required=True
     )
 
-    # app init
-    app_subparser.add_parser("init", help="initialize the database")
-
     # app install
     install_parser = app_subparser.add_parser("install", help="Install module(s)")
     install_parser.add_argument("module", help="modules to install", nargs="+")
@@ -1179,7 +1264,7 @@ def main():
     # app upgrade
     upgrade_parser = app_subparser.add_parser("upgrade", help="Upgrade module(s)")
     upgrade_parser.add_argument(
-        "module", help="modules to upgrade", default="all", nargs="*"
+        "module", help="modules to upgrade", default=["all"], nargs="*"
     )
 
     # ===================
@@ -1378,44 +1463,33 @@ def main():
     elif args.command == "restart":
         restart()
     elif args.command == "app":
-        print(args.command, args)
-        if args.app == "init":
-            app_init()
-        elif args.app == "install":
-            app_install()
-        elif args.app == "upgrade":
-            app_upgrade
+        if args.app == "install" and args.module:
+            app_install_upgrade(args.module, install=True)
+        elif args.app == "upgrade" and args.module:
+            app_install_upgrade(args.module, install=False)
     elif args.command == "logs":
-        print(args.command, args)
         logs()
-    elif args.command == "scaffold":
-        print(args.command, args)
-        scaffold()
+    elif args.command == "scaffold" and args.module:
+        scaffold(args.module)
     elif args.command == "psql":
-        print(args.command, args)
         psql()
     elif args.command == "query":
-        print(args.command, args)
         query()
     elif args.command == "backup":
-        print(args.command, args)
         backup()
-    elif args.command == "restore":
-        print(args.command, args)
-        restore()
+    elif args.command == "restore" and args.file:
+        restore(args.file)
     elif args.command == "manifest":
-        print(args.command, args)
         if args.manifest == "export":
             manifest_export()
-        elif args.manifest == "import":
-            manifest_import()
-        elif args.manifest == "remote":
-            manifest_remote()
+        elif args.manifest == "import" and args.file:
+            manifest_import(args.file)
+        elif args.manifest == "remote" and args.file:
+            manifest_remote(args.file)
     elif args.command == "admin":
-        print(args.command, args)
-        if args.admin == "admin":
+        if args.admin == "admin" and args.username:
             admin_user(args.username)
-        elif args.admin == "password":
+        elif args.admin == "password" and args.password:
             admin_password(args.password)
     elif args.command == "project":
         print(args.command, args)
