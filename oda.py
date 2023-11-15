@@ -3,7 +3,7 @@
 This tool uses a local kubernetes cluster to spin up develompent environments
 It manages the Odoo source repositories in the workspace/repo/odoo directory
 """
-from shutil import copytree
+from shutil import copytree, rmtree
 import json
 import base64
 import subprocess
@@ -13,9 +13,14 @@ import sys
 import time
 from pathlib import Path
 import yaml
-import toml
 from git import Repo
-from kubernetes import client, config
+from kubernetes import client, config, utils
+from passlib.context import CryptContext
+
+# load kubernetes config
+config.load_kube_config()
+v1 = client.CoreV1Api()
+k8s_client = client.ApiClient()
 
 SEMVER = "0.1.0"
 # paths
@@ -25,22 +30,103 @@ manifests = os.path.join(config_dir, "oda/manifests")
 storage = os.path.join(local_dir, "oda")
 repo_dir = os.path.join(Path.home(), "workspace/repos/odoo")
 project_dir = os.path.join(Path.home(), "workspace/odoo")
-current_working_directory = os.getcwd()
-
+CWD = os.getcwd()
+# images
 container_image = {"name": "odoobase", "image": "ghcr.io/ppreeper/odoobase:main"}
 
-# load kubernetes config
-config.load_kube_config()
-v1 = client.CoreV1Api()
+
+def check_project(func):
+    """Check if it is a project directory decorator"""
+
+    def wrapper():
+        if not os.path.exists(os.path.join(CWD, "conf", "odoo.conf")):
+            print("not in a project directory")
+            return
+        if not os.path.exists(os.path.join(CWD, f"{os.path.basename(CWD)}.yaml")):
+            print("no project manifest found")
+            return
+        func()
+
+    return wrapper
 
 
-#
+def are_you_sure(action):
+    """Double Prompt"""
+    text = input(f"Are you sure you want to {action} [YES/N] ")
+    if text != "YES":
+        return False
+    text = input(f"Are you really sure you want to {action} [YES/N] ")
+    if text != "YES":
+        return False
+    return True
+
+
+def change_password(new_password):
+    """Generate Password Hash"""
+    new_password = new_password.strip()
+    if new_password == "":
+        return
+    ctx = CryptContext(schemes=["pbkdf2_sha512"])
+    pw_hash = ctx.hash(new_password)
+    return pw_hash
+
+
+def get_odoo_conf(key):
+    """get key value from odoo.conf"""
+    with open(
+        os.path.join(CWD, "conf", "odoo.conf"),
+        "r",
+        encoding="UTF-8",
+    ) as f:
+        lines = f.readlines()
+        for line in lines:
+            if line.startswith(key):
+                return line.split("=")[1].strip()
+    return
+
+
+def parse_modules(modules):
+    """parse modules list"""
+    mod_list = []
+    for m in modules:
+        mod_list.extend(m.split(","))
+    return ",".join(mod_list)
+
+
 def get_pod(name):
     """Get Pod from name"""
     ret = v1.list_pod_for_all_namespaces(watch=False)
     for pod in ret.items:
         if pod.metadata.name.startswith(name):
             return pod.metadata.name
+
+
+def get_host_paths(manifest):
+    """Get PersistenVolume hostPath"""
+    host_paths = []
+    with open(manifest, "r", encoding="UTF-8") as file:
+        docs = yaml.safe_load_all(file)
+        for doc in docs:
+            if doc["kind"] == "Deployment":
+                vols = doc["spec"]["template"]["spec"]["volumes"]
+                for vol in vols:
+                    if vol["name"].startswith("odoo") or vol["name"].startswith(
+                        "enterprise"
+                    ):
+                        pvc_name = vol["persistentVolumeClaim"]["claimName"]
+                        pvcs = v1.list_namespaced_persistent_volume_claim(
+                            namespace="default"
+                        )
+                        pv_name = ""
+                        for pvc in pvcs.items:
+                            if pvc.metadata.name == pvc_name:
+                                pv_name = pvc.spec.volume_name
+                        pvs = v1.list_persistent_volume()
+                        for pv in pvs.items:
+                            if pv.metadata.name == pv_name:
+                                host_paths.append(pv.spec.host_path.path)
+
+    return host_paths
 
 
 # ===================
@@ -118,12 +204,12 @@ def gen_ingress(name, portpath):
     """Generate Ingress to Service"""
     port_dict = []
     for port_tuple in portpath:
-        port_name, port = port_tuple[0], port_tuple[1]
+        port, path, porttype = port_tuple[0], port_tuple[1], port_tuple[2]
         port_dict.append(
             {
-                "path": port,
-                "pathType": "Exact",
-                "backend": {"service": {"name": name, "port": {"number": port_name}}},
+                "path": path,
+                "pathType": porttype,
+                "backend": {"service": {"name": name, "port": {"number": port}}},
             }
         )
     cfg = {
@@ -224,7 +310,7 @@ def gen_postgres_statefulset(name, version, image, port_list):
                                     "name": "POSTGRES_PASSWORD",
                                     "valueFrom": {
                                         "secretKeyRef": {
-                                            "name": f"{name}",
+                                            "name": f"{name}-secret",
                                             "key": "password",
                                         }
                                     },
@@ -297,55 +383,16 @@ def gen_configmap(name, kv_list):
 # ===================
 # ===================
 # config
-def get_host_paths(manifest):
-    """Get PersistenVolume hostPath"""
-    host_paths = []
-    with open(manifest, "r", encoding="UTF-8") as file:
-        docs = yaml.safe_load_all(file)
-        for doc in docs:
-            if doc["kind"] == "Deployment":
-                vols = doc["spec"]["template"]["spec"]["volumes"]
-                for vol in vols:
-                    if vol["name"].startswith("odoo") or vol["name"].startswith(
-                        "enterprise"
-                    ):
-                        pvc_name = vol["persistentVolumeClaim"]["claimName"]
-                        pvcs = v1.list_namespaced_persistent_volume_claim(
-                            namespace="default"
-                        )
-                        pv_name = ""
-                        for pvc in pvcs.items:
-                            if pvc.metadata.name == pvc_name:
-                                pv_name = pvc.spec.volume_name
-                        pvs = v1.list_persistent_volume()
-                        for pv in pvs.items:
-                            if pv.metadata.name == pv_name:
-                                host_paths.append(pv.spec.host_path.path)
-
-    return host_paths
-
-
 # config vscode
+@check_project
 def config_vscode():
     """Write the VSCode config"""
-    if not os.path.exists(os.path.join(current_working_directory, "conf", "odoo.conf")):
-        print("not in a project directory")
-        return
-    project = os.path.basename(current_working_directory)
-
-    if not os.path.exists(os.path.join(current_working_directory, f"{project}.yaml")):
-        print("no project manifest found")
-        return
-
-    host_paths = get_host_paths(
-        os.path.join(current_working_directory, f"{project}.yaml")
-    )
-
-    if not os.path.exists(os.path.join(current_working_directory, ".vscode")):
-        os.makedirs(os.path.join(current_working_directory, ".vscode"))
-
+    project = os.path.basename(CWD)
+    host_paths = get_host_paths(os.path.join(CWD, f"{project}.yaml"))
+    if not os.path.exists(os.path.join(CWD, ".vscode")):
+        os.makedirs(os.path.join(CWD, ".vscode"))
     with open(
-        os.path.join(current_working_directory, ".vscode", "launch.json"),
+        os.path.join(CWD, ".vscode", "launch.json"),
         "w",
         encoding="UTF-8",
     ) as launch:
@@ -378,7 +425,7 @@ def config_vscode():
             )
         )
     with open(
-        os.path.join(current_working_directory, ".vscode", "settings.json"),
+        os.path.join(CWD, ".vscode", "settings.json"),
         "w",
         encoding="UTF-8",
     ) as settings:
@@ -398,24 +445,15 @@ def config_vscode():
 
 
 # config pyright
+@check_project
 def config_pyright():
     """Write pyrightconfig.json"""
-    if not os.path.exists(os.path.join(current_working_directory, "conf", "odoo.conf")):
-        print("not in a project directory")
-        return
-    project = os.path.basename(current_working_directory)
-
-    if not os.path.exists(os.path.join(current_working_directory, f"{project}.yaml")):
-        print("no project manifest found")
-        return
-
-    host_paths = get_host_paths(
-        os.path.join(current_working_directory, f"{project}.yaml")
-    )
+    project = os.path.basename(CWD)
+    host_paths = get_host_paths(os.path.join(CWD, f"{project}.yaml"))
     host_paths.append("addons")
 
     with open(
-        os.path.join(current_working_directory, "pyrightconfig.json"),
+        os.path.join(CWD, "pyrightconfig.json"),
         "w",
         encoding="UTF-8",
     ) as settings:
@@ -545,7 +583,7 @@ def kube_gen_postgres(version):
 def kube_apply_postgres():
     """Start PostgreSQL"""
     postgres_manifest = os.path.join(manifests, "postgres.yaml")
-    subprocess.run(["kubectl", "apply", "-f", postgres_manifest], check=True)
+    utils.create_from_yaml(k8s_client, postgres_manifest, verbose=True)
     return
 
 
@@ -595,55 +633,33 @@ def kube_gen_odoo():
 
 def kube_apply_odoo():
     """Start Odoo Volumes"""
-    print("kube_apply_odoo")
     odoo_manifest = os.path.join(manifests, "odoo.yaml")
-    subprocess.run(["kubectl", "apply", "-f", odoo_manifest], check=True)
+    utils.create_from_yaml(k8s_client, odoo_manifest, verbose=False)
     return
 
 
 # ===================
 # start
+@check_project
 def start():
     """Start the instance"""
-    if not os.path.exists(os.path.join(current_working_directory, "conf", "odoo.conf")):
-        print("not in a project directory")
-        return
-    project = os.path.basename(current_working_directory)
-    if not os.path.exists(os.path.join(current_working_directory, f"{project}.yaml")):
-        print("no project manifest found")
-        return
-    print(f"start {project}")
-    subprocess.run(
-        [
-            "kubectl",
-            "apply",
-            "-f",
-            os.path.join(current_working_directory, f"{project}.yaml"),
-        ],
-        check=True,
-    )
+    # project = os.path.basename(CWD)
+    utils.create_from_yaml(k8s_client, f"{os.path.basename(CWD)}.yaml", verbose=True)
+    # subprocess.run(
+    #     ["kubectl", "apply", "-f", os.path.join(CWD, f"{project}.yaml")],
+    #     check=True,
+    # )
     return
 
 
 # ===================
 # stop
+@check_project
 def stop():
     """Stop the instance"""
-    if not os.path.exists(os.path.join(current_working_directory, "conf", "odoo.conf")):
-        print("not in a project directory")
-        return
-    project = os.path.basename(current_working_directory)
-    if not os.path.exists(os.path.join(current_working_directory, f"{project}.yaml")):
-        print("no project manifest found")
-        return
-    print(f"stop {project}")
+    project = os.path.basename(CWD)
     subprocess.run(
-        [
-            "kubectl",
-            "delete",
-            "-f",
-            os.path.join(current_working_directory, f"{project}.yaml"),
-        ],
+        ["kubectl", "delete", "-f", os.path.join(CWD, f"{project}.yaml")],
         check=True,
     )
     return
@@ -651,44 +667,24 @@ def stop():
 
 # ===================
 # restart
+@check_project
 def restart():
     """Restart the instance"""
-    if not os.path.exists(os.path.join(current_working_directory, "conf", "odoo.conf")):
-        print("not in a project directory")
-        return
-    project = os.path.basename(current_working_directory)
-    if not os.path.exists(os.path.join(current_working_directory, f"{project}.yaml")):
-        print("no project manifest found")
-        return
+    project = os.path.basename(CWD)
     pod = get_pod(project)
     v1.delete_namespaced_pod(pod, "default")
-    print(f"restart {project}")
     return
 
 
 # ===================
 # app
-def parse_modules(modules):
-    """parse modules list"""
-    mod_list = []
-    for m in modules:
-        mod_list.extend(m.split(","))
-    return ",".join(mod_list)
-
-
 # app install
 # app upgrade
+@check_project
 def app_install_upgrade(modules, install=True):
     """Install Upgrade modules"""
     iu = "-i" if install else "-u"
-    print(f"appinstall {modules}")
-    if not os.path.exists(os.path.join(current_working_directory, "conf", "odoo.conf")):
-        print("not in a project directory")
-        return
-    project = os.path.basename(current_working_directory)
-    if not os.path.exists(os.path.join(current_working_directory, f"{project}.yaml")):
-        print("no project manifest found")
-        return
+    project = os.path.basename(CWD)
     pod_name = get_pod(project)
     mod_list = parse_modules(modules)
     subprocess.run(
@@ -712,16 +708,10 @@ def app_install_upgrade(modules, install=True):
 
 # ===================
 # logs
+@check_project
 def logs():
     """Show logs"""
-    print("logs")
-    if not os.path.exists(os.path.join(current_working_directory, "conf", "odoo.conf")):
-        print("not in a project directory")
-        return
-    project = os.path.basename(current_working_directory)
-    if not os.path.exists(os.path.join(current_working_directory, f"{project}.yaml")):
-        print("no project manifest found")
-        return
+    project = os.path.basename(CWD)
     pod_name = get_pod(project)
     subprocess.run(["kubectl", "logs", "-f", pod_name], check=True)
     return
@@ -729,16 +719,10 @@ def logs():
 
 # ===================
 # scaffold
+@check_project
 def scaffold(module):
     """Scaffold an App"""
-    print(f"scaffold {module}")
-    if not os.path.exists(os.path.join(current_working_directory, "conf", "odoo.conf")):
-        print("not in a project directory")
-        return
-    project = os.path.basename(current_working_directory)
-    if not os.path.exists(os.path.join(current_working_directory, f"{project}.yaml")):
-        print("no project manifest found")
-        return
+    project = os.path.basename(CWD)
     pod_name = get_pod(project)
     subprocess.run(
         [
@@ -760,16 +744,9 @@ def scaffold(module):
 
 # ===================
 # psql
+@check_project
 def psql():
     """Connect to Database"""
-    if not os.path.exists(os.path.join(current_working_directory, "conf", "odoo.conf")):
-        print("not in a project directory")
-        return
-    project = os.path.basename(current_working_directory)
-    if not os.path.exists(os.path.join(current_working_directory, f"{project}.yaml")):
-        print("no project manifest found")
-        return
-    print(f"psql {project}")
     db = get_odoo_conf("db_name")
     subprocess.run(
         [
@@ -800,16 +777,10 @@ def query():
 
 # ===================
 # backup
+@check_project
 def backup():
     """Backup to file"""
-    print("backup")
-    if not os.path.exists(os.path.join(current_working_directory, "conf", "odoo.conf")):
-        print("not in a project directory")
-        return
-    project = os.path.basename(current_working_directory)
-    if not os.path.exists(os.path.join(current_working_directory, f"{project}.yaml")):
-        print("no project manifest found")
-        return
+    project = os.path.basename(CWD)
     pod_name = get_pod(project)
     subprocess.run(
         ["kubectl", "exec", "--stdin", "--tty", pod_name, "--", "oda_db.py", "-b"],
@@ -820,6 +791,7 @@ def backup():
 
 # ===================
 # restore
+@check_project
 def restore(backup_files):
     """Restore from backup file"""
     # TODO: restore
@@ -830,63 +802,114 @@ def restore(backup_files):
 # ===================
 # manifest
 # manifest export
+@check_project
 def manifest_export():
     """Odoo Manifest Export"""
-    # TODO: manifest_export
-    print("manifest_export")
+    # TODO: manifest_import, where is it copying to?
+    project = os.path.basename(CWD)
+    pod_name = get_pod(project)
+    subprocess.run(
+        ["kubectl", "exec", "--stdin", "--tty", pod_name, "--", "oda_db.py", "-e"],
+        check=True,
+    )
     return
 
 
 # manifest import
+@check_project
 def manifest_import(manifest):
     """Odoo Manifest Import"""
-    # TODO: manifest_import
+    # TODO: manifest_import, where is it copying from?
     print(f"manifest_import {manifest}")
+    project = os.path.basename(CWD)
+    pod_name = get_pod(project)
+    subprocess.run(
+        ["kubectl", "exec", "--stdin", "--tty", pod_name, "--", "oda_db.py", "-i"],
+        check=True,
+    )
     return
 
 
 # manifest remote
+@check_project
 def manifest_remote(remote):
     """Odoo Manifest Import from remote"""
-    # TODO: manifest_remote
+    # TODO: manifest_remote, restore from backup file to backups folder
     print(f"manifest_remote {remote}")
+    print(
+        f"tar Oaxf /opt/odoo/{remote} ./manifest.json > /opt/odoo/backups/manifest.json"
+    )
     return
 
 
 # ===================
 # admin
 # admin user
-def admin_user(username):
+@check_project
+def admin_username():
     """Set Admin username"""
-    # TODO: admin_user
-    print(f"admin_user {username}")
+    username = input("Please enter  the new admin username: ").strip()
+    user2 = input("Please verify the new admin username: ").strip()
+    if username != user2:
+        print("usernames entered do not match")
+        return
+
+    db = get_odoo_conf("db_name")
+    subprocess.run(
+        [
+            "kubectl",
+            "exec",
+            "--stdin",
+            "--tty",
+            "postgres-0",
+            "--",
+            "/usr/local/bin/psql",
+            "-U",
+            "postgres",
+            db,
+            "-c",
+            f"""update res_users set login='{username}' where id=2;""",
+        ],
+        check=True,
+    )
     return
 
 
 # admin password
-def admin_password(password):
+@check_project
+def admin_password():
     """Set Admin password"""
-    # TODO: admin_password
-    print(f"admin_password {password}")
+    if not are_you_sure("change the admin password"):
+        return
+    pass1 = input("Please enter  the admin password: ").strip()
+    pass2 = input("Please verify the admin password: ").strip()
+    if pass1 != pass2:
+        print("passwords entered do not match")
+        return
+    password = change_password(pass1).strip()
+    db = get_odoo_conf("db_name")
+    subprocess.run(
+        [
+            "kubectl",
+            "exec",
+            "--stdin",
+            "--tty",
+            "postgres-0",
+            "--",
+            "/usr/local/bin/psql",
+            "-U",
+            "postgres",
+            db,
+            "-c",
+            f"""update res_users set password='{password}' where id=2;""",
+        ],
+        check=True,
+    )
     return
 
 
 # ===================
 # project
-
-
-def get_odoo_conf(key):
-    """get key value from odoo.conf"""
-    with open(
-        os.path.join(current_working_directory, "conf", "odoo.conf"),
-        "r",
-        encoding="UTF-8",
-    ) as f:
-        lines = f.readlines()
-        for line in lines:
-            if line.startswith(key):
-                return line.split("=")[1].strip()
-    return
 
 
 def gen_odoo_conf(dbname, epoch, enterprise=True):
@@ -922,7 +945,6 @@ def gen_odoo_conf(dbname, epoch, enterprise=True):
 
 # project init
 def project_init(edition, version, projectname):
-    # TODO: project_init
     """Initialize Project"""
     print("project_init", edition, version, projectname)
     if os.path.exists(os.path.join(project_dir, projectname)):
@@ -998,7 +1020,12 @@ def project_init(edition, version, projectname):
             )
         )
         manifest.write(gen_service(projectname, [["odoo", 8069], ["websocket", 8072]]))
-        manifest.write(gen_ingress(projectname, [[8069, "/"], [8072, "/websocket"]]))
+        manifest.write(
+            gen_ingress(
+                projectname,
+                [[8069, "/", "Prefix"], [8072, "/websocket", "Exact"]],
+            )
+        )
 
     return
 
@@ -1013,19 +1040,37 @@ def project_branch(edition, version, projectname, branch, url):
 
 
 # project reset
+@check_project
 def project_reset():
     """Project Reset: drop database and clear the data directory"""
-    # TODO: project_reset
-    print("project_reset")
-    if not os.path.exists(os.path.join(current_working_directory, "conf", "odoo.conf")):
-        print("not in a project directory")
+    project = os.path.basename(CWD)
+    db = get_odoo_conf("db_name")
+    if not are_you_sure("reset the project"):
         return
-    project = os.path.basename(current_working_directory)
-    if not os.path.exists(os.path.join(current_working_directory, f"{project}.yaml")):
-        print("no project manifest found")
-        return
-    # rm -f data/*
+    # stop
+    subprocess.run(
+        ["kubectl", "delete", "-f", os.path.join(CWD, f"{project}.yaml")],
+        check=False,
+    )
+    # rm -rf data/*
+    rmtree(os.path.join(CWD, "data"), ignore_errors=True)
+    os.makedirs(os.path.join(CWD, "data"), exist_ok=True)
     # drop db
+    subprocess.run(
+        [
+            "kubectl",
+            "exec",
+            "--stdin",
+            "--tty",
+            "postgres-0",
+            "--",
+            "/usr/local/bin/dropdb",
+            "-U",
+            "postgres",
+            db,
+        ],
+        check=False,
+    )
     return
 
 
@@ -1046,29 +1091,24 @@ def repo_base_clone():
     print("repo base clone")
     if not os.path.exists(repo_dir):
         os.makedirs(repo_dir)
-
     # community
     if os.path.exists(os.path.join(repo_dir, "odoo", ".git")):
         print("odoo community already exists")
     else:
         repo_url = "https://github.com/odoo/odoo"
         Repo.clone_from(repo_url, os.path.join(repo_dir, "odoo"))
-
     # enterprise
     if os.path.exists(os.path.join(repo_dir, "enterprise", ".git")):
         print("odoo enterprise already exists")
     else:
         repo_url = "https://github.com/odoo/enterprise"
         Repo.clone_from(repo_url, os.path.join(repo_dir, "odoo"))
-
     return
 
 
 # repo base update
 def repo_base_update():
     """repo base update"""
-    print("repo base update")
-
     # community
     repo = Repo(os.path.join(repo_dir, "odoo"))
     for remote in repo.remotes:
@@ -1082,7 +1122,6 @@ def repo_base_update():
     branch = branch_ref.split("/")[1] if len(branch_ref.split("/")) == 2 else ""
     repo.git.checkout(branch)
     repo.remotes.origin.pull()
-
     # enterprise
     repo = Repo(os.path.join(repo_dir, "enterprise"))
     for remote in repo.remotes:
@@ -1104,14 +1143,12 @@ def repo_base_update():
 # repo branch clone
 def repo_branch_clone(version):
     """repo branch clone"""
-    print("repo branch clone")
     # branch
     if os.path.exists(os.path.join(repo_dir, version)):
         print(f"odoo {version} already exists")
     else:
         branch_dir = os.path.join(repo_dir, version)
         os.makedirs(branch_dir)
-
     # community
     if not os.path.exists(os.path.join(repo_dir, version, "odoo")):
         copytree(
@@ -1121,7 +1158,6 @@ def repo_branch_clone(version):
         repo = Repo(os.path.join(repo_dir, version, "odoo"))
         repo.git.checkout(version)
         repo.remotes.origin.pull()
-
     # enterprise
     if not os.path.exists(os.path.join(repo_dir, version, "enterprise")):
         copytree(
@@ -1139,19 +1175,15 @@ def repo_branch_clone(version):
 # repo branch update
 def repo_branch_update(version):
     """repo branch update"""
-    print("repo branch update")
-
     if not os.path.exists(os.path.join(repo_dir, version)):
         print(f"branch {version} does not exist, please clone the branch")
         return
-
     # community
     repo = Repo(os.path.join(repo_dir, "odoo"))
     for remote in repo.remotes:
         remote.fetch()
     repo.git.checkout(version)
     repo.remotes.origin.pull()
-
     # enterprise
     repo = Repo(os.path.join(repo_dir, "enterprise"))
     for remote in repo.remotes:
@@ -1332,14 +1364,10 @@ def main():
     )
 
     # admin user
-    admin_user_parser = admin_subparser.add_parser("user", help="Odoo Admin username")
-    admin_user_parser.add_argument("username", help="Odoo Admin username")
+    admin_subparser.add_parser("username", help="Odoo Admin username")
 
     # admin password
-    admin_password_parser = admin_subparser.add_parser(
-        "password", help="Odoo Admin password"
-    )
-    admin_password_parser.add_argument("password", help="Odoo Admin password")
+    admin_subparser.add_parser("password", help="Odoo Admin password")
 
     # ===================
     # project       Project level commands [CAUTION]
@@ -1487,10 +1515,10 @@ def main():
         elif args.manifest == "remote" and args.file:
             manifest_remote(args.file)
     elif args.command == "admin":
-        if args.admin == "admin" and args.username:
-            admin_user(args.username)
-        elif args.admin == "password" and args.password:
-            admin_password(args.password)
+        if args.admin == "username":
+            admin_username()
+        elif args.admin == "password":
+            admin_password()
     elif args.command == "project":
         print(args.command, args)
         if (

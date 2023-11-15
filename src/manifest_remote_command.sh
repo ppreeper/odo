@@ -1,1 +1,0 @@
-tar Oaxf /opt/odoo/${args[file]} ./manifest.json > /opt/odoo/backups/manifest.json
