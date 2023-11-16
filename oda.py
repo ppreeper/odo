@@ -14,8 +14,9 @@ import time
 from pathlib import Path
 import yaml
 from git import Repo
-from kubernetes import client, config, utils
 from passlib.context import CryptContext
+from kubernetes import client, config, utils
+from kubernetes.stream import stream
 
 # load kubernetes config
 config.load_kube_config()
@@ -35,17 +36,17 @@ CWD = os.getcwd()
 container_image = {"name": "odoobase", "image": "ghcr.io/ppreeper/odoobase:main"}
 
 
-def check_project(func):
+def check_project(func, *args, **kwargs):
     """Check if it is a project directory decorator"""
 
-    def wrapper():
+    def wrapper(*args, **kwargs):
         if not os.path.exists(os.path.join(CWD, "conf", "odoo.conf")):
             print("not in a project directory")
             return
         if not os.path.exists(os.path.join(CWD, f"{os.path.basename(CWD)}.yaml")):
             print("no project manifest found")
             return
-        func()
+        func(*args, **kwargs)
 
     return wrapper
 
@@ -85,12 +86,20 @@ def get_odoo_conf(key):
     return
 
 
+def parse_multi(multi):
+    """parse multiples list"""
+    multi_list = []
+    for m in multi:
+        multi_list.extend(m.split(","))
+    return multi_list
+
+
 def parse_modules(modules):
     """parse modules list"""
-    mod_list = []
-    for m in modules:
-        mod_list.extend(m.split(","))
-    return ",".join(mod_list)
+    # mod_list = []
+    # for m in modules:
+    #     mod_list.extend(m.split(","))
+    return ",".join(parse_multi(modules))
 
 
 def get_pod(name):
@@ -200,32 +209,32 @@ def gen_service(name, port_list):
     return "---\n" + yaml_string
 
 
-def gen_ingress(name, portpath):
+def gen_ingress(ingress, port_list):
     """Generate Ingress to Service"""
     port_dict = []
-    for port_tuple in portpath:
-        port, path, porttype = port_tuple[0], port_tuple[1], port_tuple[2]
+    for port_tuple in port_list:
+        name, port, path, pathtype = port_tuple.items()
         port_dict.append(
             {
-                "path": path,
-                "pathType": porttype,
-                "backend": {"service": {"name": name, "port": {"number": port}}},
+                "path": path[1],
+                "pathType": pathtype[1],
+                "backend": {"service": {"name": name[1], "port": {"number": port[1]}}},
             }
         )
     cfg = {
         "apiVersion": "networking.k8s.io/v1",
         "kind": "Ingress",
         "metadata": {
-            "name": name,
+            "name": ingress,
             "annotations": {"ingress.kubernetes.io/rewrite-target": "/"},
         },
-        "spec": {"rules": [{"host": f"{name}.local", "http": {"paths": port_dict}}]},
+        "spec": {"rules": [{"host": f"{ingress}.local", "http": {"paths": port_dict}}]},
     }
     yaml_string = yaml.dump(cfg)
     return "---\n" + yaml_string
 
 
-def gen_deployment(name, image, ports, volumes, globalvols):
+def gen_deployment(deployment, image, ports, volumes, globalvols):
     """Generate Deployment"""
     port_dict = []
     for port in ports:
@@ -234,32 +243,34 @@ def gen_deployment(name, image, ports, volumes, globalvols):
     volumemount_dict = []
     volume_dict = []
     for volume in volumes:
-        volumemount_dict.append({"mountPath": volume[1], "name": f"{name}-{volume[0]}"})
+        name, _, _ = volume.items()
+        volumemount_dict.append(
+            {"mountPath": f"/opt/odoo/{name[1]}", "name": f"{deployment}-{name[1]}"}
+        )
         volume_dict.append(
             {
-                "name": f"{name}-{volume[0]}",
-                "persistentVolumeClaim": {"claimName": f"{name}-{volume[0]}-pvc"},
+                "name": f"{deployment}-{name[1]}",
+                "persistentVolumeClaim": {"claimName": f"{deployment}-{name[1]}-pvc"},
             }
         )
-
     for volume in globalvols:
-        volumemount_dict.append({"mountPath": volume[1], "name": f"{volume[0]}"})
+        name, path = volume.items()
+        volumemount_dict.append({"mountPath": path[1], "name": f"{name[1]}"})
         volume_dict.append(
             {
-                "name": f"{volume[0]}",
-                "persistentVolumeClaim": {"claimName": f"{volume[0]}-pvc"},
+                "name": f"{name[1]}",
+                "persistentVolumeClaim": {"claimName": f"{name[1]}-pvc"},
             }
         )
-
     cfg = {
         "apiVersion": "apps/v1",
         "kind": "Deployment",
-        "metadata": {"name": name, "labels": {"app": name}},
+        "metadata": {"name": deployment, "labels": {"app": deployment}},
         "spec": {
             "replicas": 1,
-            "selector": {"matchLabels": {"app": name}},
+            "selector": {"matchLabels": {"app": deployment}},
             "template": {
-                "metadata": {"labels": {"app": name}},
+                "metadata": {"labels": {"app": deployment}},
                 "spec": {
                     "containers": [
                         {
@@ -643,12 +654,8 @@ def kube_apply_odoo():
 @check_project
 def start():
     """Start the instance"""
-    # project = os.path.basename(CWD)
-    utils.create_from_yaml(k8s_client, f"{os.path.basename(CWD)}.yaml", verbose=True)
-    # subprocess.run(
-    #     ["kubectl", "apply", "-f", os.path.join(CWD, f"{project}.yaml")],
-    #     check=True,
-    # )
+    project = os.path.basename(CWD)
+    utils.create_from_yaml(k8s_client, f"{project}.yaml", verbose=False)
     return
 
 
@@ -658,10 +665,7 @@ def start():
 def stop():
     """Stop the instance"""
     project = os.path.basename(CWD)
-    subprocess.run(
-        ["kubectl", "delete", "-f", os.path.join(CWD, f"{project}.yaml")],
-        check=True,
-    )
+    subprocess.run(["kubectl", "delete", "-f", f"{project}.yaml"], check=False)
     return
 
 
@@ -687,21 +691,23 @@ def app_install_upgrade(modules, install=True):
     project = os.path.basename(CWD)
     pod_name = get_pod(project)
     mod_list = parse_modules(modules)
-    subprocess.run(
-        [
-            "kubectl",
-            "exec",
-            "--stdin",
-            "--tty",
-            pod_name,
-            "--",
-            "odoo/odoo-bin",
-            "--no-http",
-            "--stop-after-init",
-            iu,
-            f"{mod_list}",
-        ],
-        check=True,
+    pod_name = get_pod(project)
+    exec_command = [
+        "odoo/odoo-bin",
+        "--no-http",
+        "--stop-after-init",
+        iu,
+        f"{mod_list}",
+    ]
+    stream(
+        v1.connect_get_namespaced_pod_exec,
+        pod_name,
+        "default",
+        command=exec_command,
+        stderr=True,
+        stdin=False,
+        stdout=True,
+        tty=False,
     )
     return
 
@@ -724,20 +730,17 @@ def scaffold(module):
     """Scaffold an App"""
     project = os.path.basename(CWD)
     pod_name = get_pod(project)
-    subprocess.run(
-        [
-            "kubectl",
-            "exec",
-            "--stdin",
-            "--tty",
-            pod_name,
-            "--",
-            "odoo/odoo-bin",
-            "scaffold",
-            f"{module}",
-            "/opt/odoo/addons/.",
-        ],
-        check=True,
+
+    exec_command = ["odoo/odoo-bin", "scaffold", f"{module}", "/opt/odoo/addons/."]
+    stream(
+        v1.connect_get_namespaced_pod_exec,
+        pod_name,
+        "default",
+        command=exec_command,
+        stderr=True,
+        stdin=False,
+        stdout=True,
+        tty=False,
     )
     return
 
@@ -748,20 +751,21 @@ def scaffold(module):
 def psql():
     """Connect to Database"""
     db = get_odoo_conf("db_name")
+    pod_name = get_pod("postgres")
     subprocess.run(
         [
             "kubectl",
             "exec",
             "--stdin",
             "--tty",
-            "postgres-0",
+            pod_name,
             "--",
-            "su",
+            "/usr/local/bin/psql",
+            "-U",
             "postgres",
-            "-c",
-            f"/usr/local/bin/psql {db}",
+            db,
         ],
-        check=True,
+        check=False,
     )
     return
 
@@ -795,50 +799,27 @@ def backup():
 def restore(backup_files):
     """Restore from backup file"""
     # TODO: restore
-    print(f"restore {backup_files}")
-    return
-
-
-# ===================
-# manifest
-# manifest export
-@check_project
-def manifest_export():
-    """Odoo Manifest Export"""
-    # TODO: manifest_import, where is it copying to?
+    files = parse_multi(backup_files)
+    print(f"restore {files}")
     project = os.path.basename(CWD)
     pod_name = get_pod(project)
-    subprocess.run(
-        ["kubectl", "exec", "--stdin", "--tty", pod_name, "--", "oda_db.py", "-e"],
-        check=True,
-    )
-    return
-
-
-# manifest import
-@check_project
-def manifest_import(manifest):
-    """Odoo Manifest Import"""
-    # TODO: manifest_import, where is it copying from?
-    print(f"manifest_import {manifest}")
-    project = os.path.basename(CWD)
-    pod_name = get_pod(project)
-    subprocess.run(
-        ["kubectl", "exec", "--stdin", "--tty", pod_name, "--", "oda_db.py", "-i"],
-        check=True,
-    )
-    return
-
-
-# manifest remote
-@check_project
-def manifest_remote(remote):
-    """Odoo Manifest Import from remote"""
-    # TODO: manifest_remote, restore from backup file to backups folder
-    print(f"manifest_remote {remote}")
-    print(
-        f"tar Oaxf /opt/odoo/{remote} ./manifest.json > /opt/odoo/backups/manifest.json"
-    )
+    for bfile in files:
+        print(pod_name, bfile)
+        # subprocess.run(
+        #     [
+        #         "kubectl",
+        #         "exec",
+        #         "--stdin",
+        #         "--tty",
+        #         pod_name,
+        #         "--",
+        #         "oda_db.py",
+        #         "-r",
+        #         "-d",
+        #         os.path.join("/opt/odoo/backups/", bfile),
+        #     ],
+        #     check=True,
+        # )
     return
 
 
@@ -910,10 +891,9 @@ def admin_password():
 
 # ===================
 # project
-
-
 def gen_odoo_conf(dbname, epoch, enterprise=True):
     """Generate and write the project odoo.conf file"""
+    dbname = dbname.replace("-", "_")
     enterprise_dir = ""
     if enterprise:
         enterprise_dir = "/opt/odoo/enterprise,"
@@ -943,99 +923,104 @@ def gen_odoo_conf(dbname, epoch, enterprise=True):
     }
 
 
-# project init
-def project_init(edition, version, projectname):
-    """Initialize Project"""
-    print("project_init", edition, version, projectname)
-    if os.path.exists(os.path.join(project_dir, projectname)):
-        print(f"project {projectname} already exists")
-        return
-    os.makedirs(os.path.join(project_dir, projectname))
-    for pdir in ["addons", "conf", "data"]:
-        os.makedirs(os.path.join(project_dir, projectname, pdir))
-
+def write_odoo_conf(file, project_name, edition):
+    """Write Odoo Configfile"""
     t = time.strftime("%Y%m%d%H%M%S", time.localtime(time.time()))
-
-    with open(
-        os.path.join(project_dir, projectname, "conf", "odoo.conf"),
-        "w",
-        encoding="UTF-8",
-    ) as odoo_conf:
+    with open(file, "w", encoding="UTF-8") as odoo_conf:
         if edition == "community":
-            oconf = gen_odoo_conf(projectname, epoch=t, enterprise=False)
+            oconf = gen_odoo_conf(project_name, epoch=t, enterprise=False)
         else:
-            oconf = gen_odoo_conf(projectname, epoch=t, enterprise=True)
+            oconf = gen_odoo_conf(project_name, epoch=t, enterprise=True)
         odoo_conf.write("[options]" + "\n")
         for k, v in oconf.items():
             odoo_conf.write(f"{k} = {v}" + "\n")
+    return
+
+
+def project_setup(edition, version, project_name):
+    """Project Config Setup"""
+    if os.path.exists(os.path.join(project_dir, project_name)):
+        print(f"project {project_name} already exists")
+        return
+    os.makedirs(os.path.join(project_dir, project_name))
+    for pdir in ["addons", "conf", "data"]:
+        os.makedirs(os.path.join(project_dir, project_name, pdir))
+    # odoo.conf
+    write_odoo_conf(
+        os.path.join(project_dir, project_name, "conf", "odoo.conf"),
+        project_name,
+        edition,
+    )
+    vers = version.replace(".", "-")
     volumes = [
+        {"name": "conf", "acl": "ReadOnlyMany", "size": "1Mi"},
+        {"name": "addons", "acl": "ReadWriteOnce", "size": "10Gi"},
+        {"name": "data", "acl": "ReadWriteOnce", "size": "10Gi"},
+    ]
+    global_vols = [
+        {"name": "backups", "path": "/opt/odoo/backups"},
+        {"name": f"odoo-{vers}", "path": "/opt/odoo/odoo"},
+        {"name": f"enterprise-{vers}", "path": "/opt/odoo/enterprise"},
+    ]
+    port_list = [
+        {"name": "odoo", "port": 8069, "path": "/", "pathtype": "Prefix"},
         {
-            "name": "conf",
-            "acl": "ReadOnlyMany",
-            "size": "1Mi",
+            "name": "websocket",
+            "port": 8072,
+            "path": "/websocket",
+            "pathtype": "Exact",
         },
         {
-            "name": "addons",
-            "acl": "ReadWriteOnce",
-            "size": "10Gi",
-        },
-        {
-            "name": "data",
-            "acl": "ReadWriteOnce",
-            "size": "10Gi",
+            "name": "longpolling",
+            "port": 8072,
+            "path": "/longpolling",
+            "pathtype": "Prefix",
         },
     ]
-    dep_vols = []
-    for vol in volumes:
-        dep_vols.append([vol["name"], f"/opt/odoo/{vol['name']}"])
     with open(
-        os.path.join(project_dir, projectname, f"{projectname}.yaml"),
+        os.path.join(project_dir, project_name, f"{project_name}.yaml"),
         "w",
         encoding="UTF-8",
     ) as manifest:
         for vol in volumes:
+            name, acl, size = vol.items()
             manifest.write(
                 gen_pv(
-                    f"{projectname}-{vol['name']}",
-                    vol["acl"],
-                    vol["size"],
-                    os.path.join(project_dir, projectname, vol["name"]),
+                    f"{project_name}-{name[1]}",
+                    acl[1],
+                    size[1],
+                    os.path.join(project_dir, project_name, name[1]),
                 )
             )
-            manifest.write(
-                gen_pvc(f"{projectname}-{vol['name']}", vol["acl"], vol["size"])
-            )
-        vers = version.replace(".", "-")
+            manifest.write(gen_pvc(f"{project_name}-{name[1]}", acl[1], size[1]))
         manifest.write(
             gen_deployment(
-                projectname,
-                container_image,
-                [8069, 8072],
-                dep_vols,
-                [
-                    ["backups", "/opt/odoo/backups"],
-                    [f"odoo-{vers}", "/opt/odoo/odoo"],
-                    [f"enterprise-{vers}", "/opt/odoo/enterprise"],
-                ],
+                project_name, container_image, [8069, 8072], volumes, global_vols
             )
         )
-        manifest.write(gen_service(projectname, [["odoo", 8069], ["websocket", 8072]]))
-        manifest.write(
-            gen_ingress(
-                projectname,
-                [[8069, "/", "Prefix"], [8072, "/websocket", "Exact"]],
-            )
-        )
+        manifest.write(gen_service(project_name, [["odoo", 8069], ["websocket", 8072]]))
+        manifest.write(gen_ingress(project_name, port_list))
+    return
 
+
+# project init
+def project_init(edition, version, projectname):
+    """Initialize Project"""
+    project_name = projectname
+    project_setup(edition, version, project_name)
     return
 
 
 # project branch
 def project_branch(edition, version, projectname, branch, url):
     """Initialize Project"""
-    # TODO: project_branch
-    print("project_branch")
-    print(edition, version, projectname, branch, url)
+    project_name = f"{projectname}" if branch == "" else f"{projectname}-{branch}"
+    project_setup(edition, version, project_name)
+    Repo.clone_from(
+        url,
+        os.path.join(project_dir, project_name, "addons"),
+        branch=branch,
+    )
     return
 
 
@@ -1075,10 +1060,16 @@ def project_reset():
 
 
 # project rebuild
+@check_project
 def project_rebuild():
     """Rebuild project with db and filestore of another project but with current addons"""
     print("project_rebuild")
     # TODO: project rebuild from one project to current project
+    # stop instance
+    # rm -rf data/*
+    # drop db
+    # copy files
+    # clone db
     return
 
 
@@ -1330,33 +1321,6 @@ def main():
     restore_parser.add_argument("file", help="Path to backup file", nargs="+")
 
     # ===================
-    # manifest      export import module manifest
-    manifest_parser = subparsers.add_parser(
-        "manifest", help="export import module manifest"
-    )
-    manifest_subparser = manifest_parser.add_subparsers(
-        dest="manifest",
-        title="manifest",
-        help="export import module manifest",
-        required=True,
-    )
-
-    # manifest export
-    manifest_subparser.add_parser("export", help="export manifest.json")
-
-    # manifest import
-    manifest_import_parser = manifest_subparser.add_parser(
-        "import", help="import manifest.json"
-    )
-    manifest_import_parser.add_argument("file", help="manifest file to read")
-
-    # manifest remote
-    manifest_remote_parser = manifest_subparser.add_parser(
-        "remote", help="import manifest.json from backup file"
-    )
-    manifest_remote_parser.add_argument("file", help="backup file to read")
-
-    # ===================
     # admin         Admin user management
     admin_parser = subparsers.add_parser("admin", help="Admin user management")
     admin_subparser = admin_parser.add_subparsers(
@@ -1402,12 +1366,12 @@ def main():
         help="community or enterprise",
         choices=["community", "enterprise"],
     )
-    project_branch_parser.add_argument("version", help="Odoo Branch")
     project_branch_parser.add_argument(
-        "projectname",
-        help="Project Name",
+        "version",
+        help="Odoo Branch",
         choices=get_current_odoo_repos(),
     )
+    project_branch_parser.add_argument("projectname", help="Project Name")
     project_branch_parser.add_argument("branch", help="Project Branch")
     project_branch_parser.add_argument("url", help="Project URL")
 
@@ -1498,6 +1462,7 @@ def main():
     elif args.command == "logs":
         logs()
     elif args.command == "scaffold" and args.module:
+        print(args)
         scaffold(args.module)
     elif args.command == "psql":
         psql()
@@ -1507,13 +1472,6 @@ def main():
         backup()
     elif args.command == "restore" and args.file:
         restore(args.file)
-    elif args.command == "manifest":
-        if args.manifest == "export":
-            manifest_export()
-        elif args.manifest == "import" and args.file:
-            manifest_import(args.file)
-        elif args.manifest == "remote" and args.file:
-            manifest_remote(args.file)
     elif args.command == "admin":
         if args.admin == "username":
             admin_username()
