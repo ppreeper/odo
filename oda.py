@@ -226,7 +226,6 @@ def gen_ingress(ingress, port_list):
         "kind": "Ingress",
         "metadata": {
             "name": ingress,
-            "annotations": {"ingress.kubernetes.io/rewrite-target": "/"},
         },
         "spec": {"rules": [{"host": f"{ingress}.local", "http": {"paths": port_dict}}]},
     }
